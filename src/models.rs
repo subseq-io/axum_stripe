@@ -184,8 +184,10 @@ where
     GFut: Future<Output = ()>,
     H: FnOnce(Uuid, stripe::Subscription) -> HFut,
     HFut: Future<Output = Result<()>>,
-    I: Fn(Uuid, &str, Option<u64>) -> HFut,
-    J: FnOnce(Uuid) -> GFut,
+    I: Fn(Uuid, &str, Option<u64>) -> IFut,
+    IFut: Future<Output = Result<()>>,
+    J: FnOnce(Uuid) -> JFut,
+    JFut: Future<Output = ()>,
 {
     tracing::info!("Checkout status: {:?}", params.session_id);
     let stripe_key = match std::env::var("STRIPE_API_KEY") {
