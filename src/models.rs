@@ -1,4 +1,5 @@
 use std::str::FromStr;
+use std::{future::Future, pin::Pin};
 
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Duration, TimeZone, Utc};
@@ -15,6 +16,8 @@ use crate::tables::{
     BillingLink, CheckoutSession, PricingPlan, SubscriptionState, SubscriptionStateUpdate,
     SubscriptionType,
 };
+
+type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 #[derive(Deserialize)]
 pub struct FinalizeCheckout {
@@ -70,10 +73,9 @@ fn parse_u64_opt(s: Option<&str>) -> Option<u64> {
 /// Fetch a single product for a plan key.
 /// `fetch_plan_ref` should return the Stripe `price_id` you want to sell for that plan key
 /// (usually from a tiny DB table or config).
-pub async fn get_product<F, Fut>(plan_key: &str, fetch_plan: &F) -> Result<ApiProduct>
+pub async fn get_product<F>(plan_key: &str, fetch_plan: &F) -> Result<ApiProduct>
 where
-    F: Fn(&str) -> Fut,
-    Fut: Future<Output = Result<PricingPlan>>,
+    F: for<'a> Fn(&'a str) -> BoxFut<'a, Result<PricingPlan>> + Send + Sync,
 {
     let plan = fetch_plan(plan_key).await?;
     let client = stripe_client_from_env()?;
@@ -150,18 +152,17 @@ where
     })
 }
 
-pub async fn get_products<F, Fut, G, GFut>(fetch_all: F, fetch_plan: G) -> Result<Vec<ApiProduct>>
+pub async fn get_products<F, Fut, G>(fetch_all: F, fetch_plan: &G) -> Result<Vec<ApiProduct>>
 where
     F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<Vec<PricingPlan>>>,
-    G: Fn(&str) -> GFut,
-    GFut: Future<Output = Result<PricingPlan>>,
+    Fut: Future<Output = Result<Vec<PricingPlan>>> + Send,
+    G: for<'a> Fn(&'a str) -> BoxFut<'a, Result<PricingPlan>> + Send + Sync,
 {
     let plans = fetch_all().await?;
 
-    let mut products: Vec<ApiProduct> = vec![];
+    let mut products: Vec<ApiProduct> = Vec::with_capacity(plans.len());
     for plan in plans {
-        let product = get_product(&plan.key, &fetch_plan).await?;
+        let product = get_product(&plan.key, fetch_plan).await?;
         products.push(product);
     }
 
