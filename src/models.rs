@@ -73,9 +73,9 @@ fn parse_u64_opt(s: Option<&str>) -> Option<u64> {
 /// Fetch a single product for a plan key.
 /// `fetch_plan_ref` should return the Stripe `price_id` you want to sell for that plan key
 /// (usually from a tiny DB table or config).
-pub async fn get_product<F>(plan_key: &str, fetch_plan: &F) -> Result<ApiProduct>
+pub async fn get_product<'a, F>(plan_key: &str, fetch_plan: &F) -> Result<ApiProduct>
 where
-    F: for<'a> Fn(&'a str) -> BoxFut<'a, Result<PricingPlan>> + Send + Sync,
+    F: for<'b> Fn(&'b str) -> BoxFut<'b, Result<PricingPlan>> + Send + Sync + 'a,
 {
     let plan = fetch_plan(plan_key).await?;
     let client = stripe_client_from_env()?;
@@ -572,4 +572,24 @@ where
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_compile_get_product() {
+        fn fetch_plan(key: &str) -> BoxFut<'_, Result<PricingPlan>> {
+            let key = key.to_string();
+            Box::pin(async move {
+                Ok(PricingPlan {
+                    key,
+                    price_id: "price_123".to_string(),
+                })
+            })
+        }
+
+        let _ = get_product("test", &fetch_plan);
+    }
 }
