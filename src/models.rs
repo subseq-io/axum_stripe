@@ -2,7 +2,7 @@ use std::str::FromStr;
 use std::{future::Future, pin::Pin};
 
 use anyhow::{Result, anyhow};
-use chrono::{DateTime, Duration, TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use stripe::{
@@ -407,21 +407,8 @@ where
     Ok(())
 }
 
-fn now_unix_seconds() -> i64 {
-    Utc::now().timestamp()
-}
-
 fn unix_seconds_to_systemtime(ts: i64) -> DateTime<Utc> {
     Utc.timestamp_opt(ts, 0).single().unwrap()
-}
-
-fn remaining_until_unix(ts: i64) -> Duration {
-    let now = now_unix_seconds();
-    if ts <= now {
-        Duration::seconds(0)
-    } else {
-        Duration::seconds((ts - now) as i64)
-    }
 }
 
 pub fn seats_from_subscription_first_licensed(sub: &stripe::Subscription) -> Option<u64> {
@@ -439,18 +426,16 @@ pub fn seats_from_subscription_first_licensed(sub: &stripe::Subscription) -> Opt
         .map(|q| q.max(1) as u64)
 }
 
-pub async fn subscription_updated<F, Fut, G, GFut, H>(
+pub async fn subscription_updated<F, Fut, G, GFut>(
     schedule: SubscriptionSchedule,
     get_billing_link: F,
-    upsert_subscription_state: G,
-    update_subscription: H,
+    update_subscription: G,
 ) -> Result<()>
 where
     F: FnOnce(&str) -> Fut,
     Fut: Future<Output = Option<Uuid>>,
-    G: FnOnce(Uuid, Duration) -> GFut,
+    G: FnOnce(Uuid, SubscriptionStateUpdate) -> GFut,
     GFut: Future<Output = Result<()>>,
-    H: FnOnce(Uuid, SubscriptionStateUpdate) -> GFut,
 {
     // 1) Identify the customer on the schedule
     let customer_id = match schedule.customer {
@@ -477,7 +462,6 @@ where
         .map_err(|e| anyhow!("Stripe subscription retrieve failed: {e}"))?;
 
     // 4) Compute remaining access window (or 0 if ended)
-    let remaining = remaining_until_unix(sub.current_period_end);
     let seats = seats_from_subscription_first_licensed(&sub);
 
     // 5) Build a compact state update payload for your DB
@@ -491,32 +475,32 @@ where
     };
 
     // 6) Persist idempotently
-    upsert_subscription_state(internal_id, remaining).await?;
     update_subscription(internal_id, update).await?;
     Ok(())
 }
 
-pub async fn handle_stripe_event<F, Fut, G, GFut, H, I, IFut, J, K, L>(
+pub async fn handle_stripe_event<F, Fut, G, GFut, H, HFut, I, IFut, J, JFut, K, KFut>(
     event: Event,
     get_billing_link: F,
     set_default_credits_and_seats: G,
     inactivate_subscription: H,
     get_subscription: I,
     cancel_subscription: J,
-    upsert_subscription_state: K,
-    update_subscription: L,
+    update_subscription: K,
 ) -> Result<()>
 where
     F: FnOnce(&str) -> Fut,
     Fut: Future<Output = Option<Uuid>>,
     G: Fn(Uuid) -> GFut,
     GFut: Future<Output = Result<()>>,
-    H: Fn(&str, bool) -> GFut,
+    H: Fn(&str, bool) -> HFut,
+    HFut: Future<Output = Result<()>>,
     I: FnOnce(Uuid) -> IFut,
     IFut: Future<Output = Result<SubscriptionState>>,
-    J: FnOnce(Uuid) -> GFut,
-    K: FnOnce(Uuid, Duration) -> GFut,
-    L: FnOnce(Uuid, SubscriptionStateUpdate) -> GFut,
+    J: FnOnce(Uuid) -> JFut,
+    JFut: Future<Output = Result<()>>,
+    K: FnOnce(Uuid, SubscriptionStateUpdate) -> KFut,
+    KFut: Future<Output = Result<()>>,
 {
     match event.type_ {
         EventType::SubscriptionScheduleAborted | EventType::SubscriptionScheduleCompleted => {
@@ -555,26 +539,14 @@ where
                 EventObject::SubscriptionSchedule(sub) => sub,
                 _ => return Ok(()),
             };
-            subscription_updated(
-                sub,
-                get_billing_link,
-                upsert_subscription_state,
-                update_subscription,
-            )
-            .await?;
+            subscription_updated(sub, get_billing_link, update_subscription).await?;
         }
         EventType::SubscriptionScheduleUpdated => {
             let sub = match event.data.object {
                 EventObject::SubscriptionSchedule(sub) => sub,
                 _ => return Ok(()),
             };
-            subscription_updated(
-                sub,
-                get_billing_link,
-                upsert_subscription_state,
-                update_subscription,
-            )
-            .await?;
+            subscription_updated(sub, get_billing_link, update_subscription).await?;
         }
         _ => {} // ignore irrelevant events
     }
