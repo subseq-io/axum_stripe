@@ -126,6 +126,28 @@ where
         .unwrap_or_else(|| plan.key.clone());
 
     let description = product.as_ref().and_then(|p| p.description.clone());
+    let credits = credits_from_price(&client, &price).await;
+
+    Ok(ApiProduct {
+        key: plan.key,
+        name,
+        description: description.unwrap_or_default(),
+        unit_amount: unit_amount as u32,
+        currency,
+        subscription,
+        credits,
+        trial_period_days: None,
+    })
+}
+
+pub async fn credits_from_price(client: &stripe::Client, price: &stripe::Price) -> Option<i32> {
+    let product = match price.product.clone() {
+        Some(stripe::Expandable::Object(p)) => Some(*p),
+        Some(stripe::Expandable::Id(pid)) => stripe::Product::retrieve(&client, &pid, &[])
+            .await
+            .ok(),
+        None => None,
+    };
 
     // Credits: recommend storing on Product metadata (or Price metadata) as "credits".
     // If you want plan-specific credits per price, prefer price.metadata.
@@ -140,16 +162,7 @@ where
         from_price.or(from_product)
     };
 
-    Ok(ApiProduct {
-        key: plan.key,
-        name,
-        description: description.unwrap_or_default(),
-        unit_amount: unit_amount as u32,
-        currency,
-        subscription,
-        credits: credits.map(|c| c as i32),
-        trial_period_days: None,
-    })
+    credits.map(|c| c as i32)
 }
 
 pub async fn get_products<F, Fut, G>(fetch_all: F, fetch_plan: &G) -> Result<Vec<ApiProduct>>
@@ -243,18 +256,12 @@ where
             // If no subscription, add extra credits for the one-time purchase
             None => {
                 for item in line_items.unwrap_or_default().data {
-                    let product_id = item
-                        .price
-                        .as_ref()
-                        .and_then(|price| price.product.as_ref())
-                        .and_then(|product| match product {
-                            Expandable::Id(id) => Some(id),
-                            Expandable::Object(product) => Some(&product.id),
-                        });
-                    if let Some(product_id) = product_id {
-                        add_credits_to_plan(checkout.internal_id, &product_id, item.quantity)
-                            .await?;
-                    }
+                    let price_id = match item.price {
+                        Some(price) => price.id,
+                        None => continue,
+                    };
+                    add_credits_to_plan(checkout.internal_id, &price_id, item.quantity)
+                        .await?;
                 }
             }
         };
