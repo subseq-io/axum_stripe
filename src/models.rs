@@ -60,7 +60,7 @@ pub struct ApiProduct {
     trial_period_days: Option<u32>,
 }
 
-fn stripe_client_from_env() -> Result<stripe::Client> {
+pub fn stripe_client_from_env() -> Result<stripe::Client> {
     let stripe_key =
         std::env::var("STRIPE_API_KEY").map_err(|_| anyhow!("Missing STRIPE_API_KEY"))?;
     Ok(stripe::Client::new(stripe_key))
