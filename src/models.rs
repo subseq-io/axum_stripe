@@ -479,28 +479,25 @@ where
     Ok(())
 }
 
-pub async fn handle_stripe_event<F, Fut, G, GFut, H, HFut, I, IFut, J, JFut, K, KFut>(
+pub async fn handle_stripe_event<F, Fut, G, GFut, H, HFut, I, IFut, J, JFut>(
     event: Event,
     get_billing_link: F,
-    set_default_credits_and_seats: G,
-    inactivate_subscription: H,
-    get_subscription: I,
-    cancel_subscription: J,
-    update_subscription: K,
+    inactivate_subscription: G,
+    get_subscription: H,
+    cancel_subscription: I,
+    update_subscription: J,
 ) -> Result<()>
 where
     F: FnOnce(&str) -> Fut,
     Fut: Future<Output = Option<Uuid>>,
-    G: Fn(Uuid) -> GFut,
+    G: Fn(&str, bool) -> GFut,
     GFut: Future<Output = Result<()>>,
-    H: Fn(&str, bool) -> HFut,
-    HFut: Future<Output = Result<()>>,
+    H: FnOnce(Uuid) -> HFut,
+    HFut: Future<Output = Result<SubscriptionState>>,
     I: FnOnce(Uuid) -> IFut,
-    IFut: Future<Output = Result<SubscriptionState>>,
-    J: FnOnce(Uuid) -> JFut,
+    IFut: Future<Output = Result<()>>,
+    J: FnOnce(Uuid, SubscriptionStateUpdate) -> JFut,
     JFut: Future<Output = Result<()>>,
-    K: FnOnce(Uuid, SubscriptionStateUpdate) -> KFut,
-    KFut: Future<Output = Result<()>>,
 {
     match event.type_ {
         EventType::SubscriptionScheduleAborted | EventType::SubscriptionScheduleCompleted => {
@@ -510,13 +507,6 @@ where
             };
             let sub_id = sub.id.as_str();
             inactivate_subscription(sub_id, true).await?;
-            let internal_id = get_billing_link(sub.customer.id().as_str())
-                .await
-                .ok_or_else(|| {
-                    tracing::error!("Error fetching billing link for subscription {}", sub_id);
-                    anyhow!("Error fetching billing link")
-                })?;
-            set_default_credits_and_seats(internal_id).await?;
         }
         EventType::SubscriptionScheduleCanceled => {
             let sub = match event.data.object {
