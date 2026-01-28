@@ -432,7 +432,7 @@ pub async fn subscription_updated<F, Fut, G, GFut>(
     update_subscription: G,
 ) -> Result<()>
 where
-    F: FnOnce(&str) -> Fut,
+    F: FnOnce(String) -> Fut,
     Fut: Future<Output = Option<Uuid>>,
     G: FnOnce(Uuid, SubscriptionStateUpdate) -> GFut,
     GFut: Future<Output = Result<()>>,
@@ -444,7 +444,7 @@ where
     };
 
     // 2) Map to internal_id (if we don't know this customer, do nothing)
-    let internal_id = match get_billing_link(&customer_id).await {
+    let internal_id = match get_billing_link(customer_id.to_string()).await {
         Some(id) => id,
         None => return Ok(()),
     };
@@ -488,9 +488,9 @@ pub async fn handle_stripe_event<F, Fut, G, GFut, H, HFut, I, IFut, J, JFut>(
     update_subscription: J,
 ) -> Result<()>
 where
-    F: FnOnce(&str) -> Fut,
+    F: FnOnce(String) -> Fut,
     Fut: Future<Output = Option<Uuid>>,
-    G: Fn(&str, bool) -> GFut,
+    G: Fn(String, bool) -> GFut,
     GFut: Future<Output = Result<()>>,
     H: FnOnce(Uuid) -> HFut,
     HFut: Future<Output = Result<SubscriptionState>>,
@@ -505,7 +505,7 @@ where
                 EventObject::SubscriptionSchedule(sub) => sub,
                 _ => return Ok(()),
             };
-            let sub_id = sub.id.as_str();
+            let sub_id = sub.id.as_str().to_owned();
             inactivate_subscription(sub_id, true).await?;
         }
         EventType::SubscriptionScheduleCanceled => {
@@ -513,7 +513,7 @@ where
                 EventObject::SubscriptionSchedule(sub) => sub,
                 _ => return Ok(()),
             };
-            let internal_id = get_billing_link(sub.customer.id().as_str())
+            let internal_id = get_billing_link(sub.customer.id().as_str().to_owned())
                 .await
                 .ok_or_else(|| {
                     tracing::error!(
