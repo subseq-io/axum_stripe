@@ -181,13 +181,13 @@ where
     F: FnOnce(Uuid) -> Fut,
     Fut: Future<Output = Result<CheckoutSession>>,
     G: FnOnce(BillingLink) -> GFut,
-    GFut: Future<Output = ()>,
+    GFut: Future<Output = Result<()>>,
     H: FnOnce(Uuid, stripe::Subscription) -> HFut,
     HFut: Future<Output = Result<()>>,
     I: Fn(Uuid, &str, Option<u64>) -> IFut,
     IFut: Future<Output = Result<()>>,
     J: FnOnce(Uuid) -> JFut,
-    JFut: Future<Output = ()>,
+    JFut: Future<Output = Result<()>>,
 {
     tracing::info!("Checkout status: {:?}", params.session_id);
     let stripe_key = match std::env::var("STRIPE_API_KEY") {
@@ -218,7 +218,7 @@ where
         let customer_id = session.customer.unwrap_or_default().id();
         let internal_id = checkout.internal_id;
         let billing_link = BillingLink::new(&customer_id, internal_id);
-        upsert_billing_link(billing_link).await;
+        upsert_billing_link(billing_link).await.ok();
 
         let StripeCheckoutSession {
             subscription,
@@ -261,7 +261,7 @@ where
     } else {
         return Err(anyhow!("Checkout session not completed: {:?}", status));
     }
-    delete_checkout_session(checkout_session_id).await;
+    delete_checkout_session(checkout_session_id).await.ok();
 
     Ok(json!({
         "status": status.unwrap_or(CheckoutSessionStatus::Expired),
