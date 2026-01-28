@@ -143,9 +143,9 @@ where
 pub async fn credits_from_price(client: &stripe::Client, price: &stripe::Price) -> Option<i32> {
     let product = match price.product.clone() {
         Some(stripe::Expandable::Object(p)) => Some(*p),
-        Some(stripe::Expandable::Id(pid)) => stripe::Product::retrieve(&client, &pid, &[])
-            .await
-            .ok(),
+        Some(stripe::Expandable::Id(pid)) => {
+            stripe::Product::retrieve(&client, &pid, &[]).await.ok()
+        }
         None => None,
     };
 
@@ -197,7 +197,7 @@ where
     GFut: Future<Output = Result<()>>,
     H: FnOnce(Uuid, stripe::Subscription) -> HFut,
     HFut: Future<Output = Result<()>>,
-    I: Fn(Uuid, &str, Option<u64>) -> IFut,
+    I: Fn(Uuid, stripe::PriceId, Option<u64>) -> IFut,
     IFut: Future<Output = Result<()>>,
     J: FnOnce(Uuid) -> JFut,
     JFut: Future<Output = Result<()>>,
@@ -260,8 +260,7 @@ where
                         Some(price) => price.id,
                         None => continue,
                     };
-                    add_credits_to_plan(checkout.internal_id, &price_id, item.quantity)
-                        .await?;
+                    add_credits_to_plan(checkout.internal_id, price_id, item.quantity).await?;
                 }
             }
         };
