@@ -17,7 +17,7 @@ use crate::tables::{
     SubscriptionType,
 };
 
-type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 #[derive(Deserialize)]
 pub struct FinalizeCheckout {
