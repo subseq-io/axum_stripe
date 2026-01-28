@@ -17,7 +17,7 @@ use crate::tables::{
     SubscriptionType,
 };
 
-pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+pub type BoxFut<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
 #[derive(Deserialize)]
 pub struct FinalizeCheckout {
@@ -73,9 +73,9 @@ fn parse_u64_opt(s: Option<&str>) -> Option<u64> {
 /// Fetch a single product for a plan key.
 /// `fetch_plan_ref` should return the Stripe `price_id` you want to sell for that plan key
 /// (usually from a tiny DB table or config).
-pub async fn get_product<'a, F>(plan_key: &str, fetch_plan: &F) -> Result<ApiProduct>
+pub async fn get_product<F>(plan_key: &str, fetch_plan: &F) -> Result<ApiProduct>
 where
-    F: for<'b> Fn(&'b str) -> BoxFut<'b, Result<PricingPlan>> + Send + Sync + 'a,
+    F: for<'a> Fn(&'a str) -> BoxFut<Result<PricingPlan>> + Send + Sync,
 {
     let plan = fetch_plan(plan_key).await?;
     let client = stripe_client_from_env()?;
@@ -156,7 +156,7 @@ pub async fn get_products<F, Fut, G>(fetch_all: F, fetch_plan: &G) -> Result<Vec
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<Vec<PricingPlan>>> + Send,
-    G: for<'a> Fn(&'a str) -> BoxFut<'a, Result<PricingPlan>> + Send + Sync,
+    G: for<'a> Fn(&'a str) -> BoxFut<Result<PricingPlan>> + Send + Sync,
 {
     let plans = fetch_all().await?;
 
@@ -580,7 +580,7 @@ mod test {
 
     #[test]
     fn test_compile_get_product() {
-        fn fetch_plan(key: &str) -> BoxFut<'_, Result<PricingPlan>> {
+        fn fetch_plan(key: &str) -> BoxFut<Result<PricingPlan>> {
             let key = key.to_string();
             Box::pin(async move {
                 Ok(PricingPlan {
