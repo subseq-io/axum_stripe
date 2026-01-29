@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.86"
 async-stripe = { version = "0.37.1", default-features=false, features = ["full", "webhook-events", "stream", "tokio", "runtime-tokio-hyper-rustls"] }
-axum = { version = "0.8", optional=true, features = ["ws", "macros", "multipart", "http2"] }
+axum = { version = "0.8", optional=true, features = ["macros", "http2"] }
 axum_auth_user = { optional=true, git = "https://github.com/subseq-io/axum_auth_user.git", branch = "main" }
 chrono = { version = "0.4.41", features = ["serde"] }
 serde = { version = "1.0.194", features = ["derive"] }

@@ -1,20 +1,20 @@
 use std::sync::Arc;
 
 use axum::{
+    Router,
     body::{Body, to_bytes},
-    extract::{Json, Query, Path, Request, State},
+    extract::{Json, Path, Query, Request, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Router
 };
 use axum_auth_user::prelude::{AuthenticatedUser, ValidatesIdentity};
 use serde::Deserialize;
 use stripe::Webhook;
 
-use crate::{models::FinalizeCheckout, tables::PricingPlan};
 use crate::db;
 use crate::error::{ErrorKind, LibError};
+use crate::{models::FinalizeCheckout, tables::PricingPlan};
 
 #[derive(Debug)]
 pub struct AppError(pub LibError);
@@ -52,11 +52,7 @@ pub trait HasPool {
     fn pool(&self) -> Arc<sqlx::PgPool>;
 }
 
-pub trait HasIdp {
-    fn idp(&self) -> Arc<axum_auth_user::oidc::IdentityProvider>;
-}
-
-pub trait StripeApp: HasBaseUrl + HasPool + HasIdp + ValidatesIdentity {}
+pub trait StripeApp: HasBaseUrl + HasPool + ValidatesIdentity {}
 
 async fn get_product_handler<S>(
     State(app): State<S>,
@@ -69,9 +65,7 @@ where
     Ok(Json(product))
 }
 
-async fn get_products_handler<S>(
-    State(app): State<S>,
-) -> Result<impl IntoResponse, AppError>
+async fn get_products_handler<S>(State(app): State<S>) -> Result<impl IntoResponse, AppError>
 where
     S: StripeApp + Clone + Send + Sync + 'static,
 {
@@ -108,15 +102,16 @@ where
     let internal_id = auth_user.id().0;
     let base_url = app.base_url();
     let stripe_return_uri = "/stripe/checkout/done";
-    let SelectedPlan{ plan, quantity } = params;
+    let SelectedPlan { plan, quantity } = params;
     let session = db::create_checkout_cart(
         app.pool(),
         internal_id,
         &base_url,
         stripe_return_uri,
         &plan,
-        quantity
-    ).await?;
+        quantity,
+    )
+    .await?;
     Ok(Json(serde_json::json!({"clientSecret": session})))
 }
 
@@ -185,7 +180,10 @@ where
     Router::new()
         .route("/stripe/product/:product_id", get(get_product_handler::<S>))
         .route("/stripe/products", get(get_products_handler::<S>))
-        .route("/stripe/checkout/status", get(stripe_checkout_status_handler::<S>))
+        .route(
+            "/stripe/checkout/status",
+            get(stripe_checkout_status_handler::<S>),
+        )
         .route("/stripe/checkout", get(stripe_checkout_cart_handler::<S>))
         .route("/stripe/webhook", post(stripe_webhook_handler::<S>))
         .route(
