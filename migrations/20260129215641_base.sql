@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS stripe.subscriptions (
     created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     subscription_id TEXT,
-    subscription_type TEXT NOT NULL
+    subscription_type TEXT NOT NULL,
     seats INTEGER,
     is_active BOOLEAN DEFAULT TRUE,
     current_period_timestamp TIMESTAMP,
