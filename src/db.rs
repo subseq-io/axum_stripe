@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use anyhow::anyhow;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use sqlx::migrate::{MigrateError, Migrator};
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
@@ -12,9 +14,13 @@ use crate::tables::{
     SubscriptionType,
 };
 
-pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+pub static MIGRATOR: Lazy<Migrator> = Lazy::new(|| {
+    let mut m = sqlx::migrate!("./migrations");
+    m.set_ignore_missing(true);
+    m
+});
 
-pub async fn create_stripe_tables(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
+pub async fn create_stripe_tables(pool: &PgPool) -> Result<(), MigrateError> {
     MIGRATOR.run(pool).await
 }
 
