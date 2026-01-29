@@ -173,12 +173,15 @@ where
     Ok(StatusCode::NO_CONTENT)
 }
 
-pub fn router<S>() -> Router<S>
+pub fn routes<S>() -> Router<S>
 where
     S: StripeApp + Clone + Send + Sync + 'static,
 {
     Router::new()
-        .route("/stripe/product/:product_id", get(get_product_handler::<S>))
+        .route(
+            "/stripe/product/{product_id}",
+            get(get_product_handler::<S>),
+        )
         .route("/stripe/products", get(get_products_handler::<S>))
         .route(
             "/stripe/checkout/status",
