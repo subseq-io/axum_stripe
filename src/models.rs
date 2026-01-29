@@ -1,7 +1,7 @@
 use std::str::FromStr;
 use std::{future::Future, pin::Pin};
 
-use anyhow::{Result, anyhow};
+use anyhow::anyhow;
 use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -12,6 +12,7 @@ use stripe::{
 };
 use uuid::Uuid;
 
+use crate::error::{LibError, Result};
 use crate::tables::{
     BillingLink, CheckoutSession, PricingPlan, SubscriptionState, SubscriptionStateUpdate,
     SubscriptionType,
@@ -33,14 +34,17 @@ pub enum SubscriptionPeriod {
 }
 
 impl FromStr for SubscriptionPeriod {
-    type Err = String;
+    type Err = LibError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "one_time" => Ok(SubscriptionPeriod::OneTime),
             "monthly" => Ok(SubscriptionPeriod::Monthly),
             "yearly" => Ok(SubscriptionPeriod::Yearly),
-            _ => Err(format!("Invalid subscription type: {}", s)),
+            _ => Err(LibError::invalid(
+                "Invalid subscription type",
+                anyhow!("SubscriptionPeriod::from_str failed {}", s),
+            )),
         }
     }
 }
@@ -61,8 +65,12 @@ pub struct ApiProduct {
 }
 
 pub fn stripe_client_from_env() -> Result<stripe::Client> {
-    let stripe_key =
-        std::env::var("STRIPE_API_KEY").map_err(|_| anyhow!("Missing STRIPE_API_KEY"))?;
+    let stripe_key = std::env::var("STRIPE_API_KEY").map_err(|_| {
+        LibError::upstream(
+            "Server misconfiguration",
+            anyhow!("stripe_client_from_env missing STRIPE_API_KEY"),
+        )
+    })?;
     Ok(stripe::Client::new(stripe_key))
 }
 
@@ -80,18 +88,30 @@ where
     let plan = fetch_plan(plan_key).await?;
     let client = stripe_client_from_env()?;
 
-    let price_id = stripe::PriceId::from_str(&plan.price_id)
-        .map_err(|_| anyhow!("Invalid Stripe price id: {}", plan.price_id))?;
+    let price_id = stripe::PriceId::from_str(&plan.price_id).map_err(|_| {
+        LibError::invalid(
+            "Invalid pricing plan configuration",
+            anyhow!("get_product invalid Stripe price id: {}", plan.price_id),
+        )
+    })?;
 
     // Expand product so we can read name/description/metadata in one call.
     let expand: &[&str] = &["product"];
     let price = stripe::Price::retrieve(&client, &price_id, expand)
         .await
-        .map_err(|e| anyhow!("Stripe price retrieve failed: {e}"))?;
+        .map_err(|e| {
+            LibError::upstream(
+                "Failed to retrieve product information",
+                anyhow!("get_product stripe price retrieve failed: {e}"),
+            )
+        })?;
 
-    let currency = price
-        .currency
-        .ok_or_else(|| anyhow!("Stripe price missing currency"))?;
+    let currency = price.currency.ok_or_else(|| {
+        LibError::upstream(
+            "Failed to retrieve product information",
+            anyhow!("get_product stripe price missing currency"),
+        )
+    })?;
 
     // For “flat” prices this is Some. For usage/tiered, it can be None.
     let unit_amount = price
@@ -100,7 +120,12 @@ where
             .unit_amount_decimal
             .as_ref()
             .and_then(|s| s.parse::<i64>().ok()))
-        .ok_or_else(|| anyhow!("Stripe price missing unit_amount (usage/tiered price?)"))?;
+        .ok_or_else(|| {
+            LibError::upstream(
+                "Failed to retrieve product information",
+                anyhow!("get_product stripe price missing unit_amount (usage/tiered price?)"),
+            )
+        })?;
 
     let subscription = match price.recurring.as_ref().map(|r| r.interval) {
         Some(stripe::RecurringInterval::Year) => SubscriptionPeriod::Yearly,
@@ -114,7 +139,12 @@ where
         Some(stripe::Expandable::Id(pid)) => Some(
             stripe::Product::retrieve(&client, &pid, &[])
                 .await
-                .map_err(|e| anyhow!("Stripe product retrieve failed: {e}"))?,
+                .map_err(|e| {
+                    LibError::upstream(
+                        "Failed to retrieve product information",
+                        anyhow!("get_product stripe product retrieve failed: {e}"),
+                    )
+                })?,
         ),
         None => None,
     };
@@ -203,25 +233,29 @@ where
     JFut: Future<Output = Result<()>>,
 {
     tracing::info!("Checkout status: {:?}", params.session_id);
-    let stripe_key = match std::env::var("STRIPE_API_KEY") {
-        Ok(key) => key,
-        Err(_) => return Err(anyhow!("Missing STRIPE_API_KEY")),
-    };
-    let client = stripe::Client::new(stripe_key);
+    let client = stripe_client_from_env()?;
     let session_id = CheckoutSessionId::from_str(&params.session_id).map_err(|err| {
-        tracing::error!("Error parsing session ID: {}", err);
-        anyhow!("Invalid Session ID")
+        LibError::invalid(
+            "Invalid Session ID",
+            anyhow!("checkout_status error parsing session ID: {}", err),
+        )
     })?;
     let session = StripeCheckoutSession::retrieve(&client, &session_id, &[])
         .await
         .map_err(|err| {
             tracing::error!("Error retrieving checkout session: {}", err);
-            anyhow!("Checkout session error")
+            LibError::upstream(
+                "Failed to retrieve checkout session",
+                anyhow!("checkout_status session retrieval error: {}", err),
+            )
         })?;
     let client_reference_id = session.client_reference_id.unwrap_or_default();
     let checkout_session_id = Uuid::parse_str(&client_reference_id).map_err(|err| {
         tracing::error!("Error parsing checkout session ID: {}", err);
-        anyhow!("Invalid checkout ID")
+        LibError::invalid(
+            "Invalid checkout session",
+            anyhow!("checkout_status invalid client reference ID: {}", err),
+        )
     })?;
     let checkout = get_checkout_session(checkout_session_id).await?;
 
@@ -246,7 +280,10 @@ where
                         .await
                         .map_err(|err| {
                         tracing::error!("Error retrieving subscription: {}", err);
-                        anyhow!("Subscription error")
+                        LibError::upstream(
+                            "Failed to retrieve subscription",
+                            anyhow!("checkout_status subscription retrieval error: {}", err),
+                        )
                     })?,
                     Expandable::Object(sub) => *sub,
                 };
@@ -265,7 +302,10 @@ where
             }
         };
     } else {
-        return Err(anyhow!("Checkout session not completed: {:?}", status));
+        return Err(LibError::invalid(
+            "Checkout session not completed",
+            anyhow!("Checkout session not completed: {status:?}"),
+        ));
     }
     delete_checkout_session(checkout_session_id).await.ok();
 
@@ -293,12 +333,21 @@ where
     let client = stripe_client_from_env()?;
     let customer_id = get_customer_id(internal_id).await;
 
-    let price_id = stripe::PriceId::from_str(&plan.price_id)
-        .map_err(|_| anyhow!("Invalid Stripe price id: {}", plan.price_id))?;
+    let price_id = stripe::PriceId::from_str(&plan.price_id).map_err(|_| {
+        LibError::invalid(
+            "Invalid pricing plan configuration",
+            anyhow!("Invalid Stripe price id: {}", plan.price_id),
+        )
+    })?;
     let expand: &[&str] = &["product"];
     let price = stripe::Price::retrieve(&client, &price_id, expand)
         .await
-        .map_err(|e| anyhow!("Stripe price retrieve failed: {e}"))?;
+        .map_err(|e| {
+            LibError::upstream(
+                "Failed to retrieve product information",
+                anyhow!("Stripe price retrieve failed: {e}"),
+            )
+        })?;
 
     let mut params = CreateCheckoutSession::new();
     let auto_tax = CreateCheckoutSessionAutomaticTax {
@@ -335,11 +384,20 @@ where
         .await
         .map_err(|err| {
             tracing::error!("Error creating checkout session: {:?}", err);
-            anyhow!("Error creating checkout session")
+            LibError::upstream(
+                "Failed to create checkout session",
+                anyhow!(
+                    "create_checkout_cart error creating checkout session: {:?}",
+                    err
+                ),
+            )
         })?;
     let secret = stripe_session.client_secret.ok_or_else(|| {
         tracing::error!("Error fetching client secret");
-        anyhow!("Error fetching client secret")
+        LibError::upstream(
+            "Failed to create checkout session",
+            anyhow!("create_checkout_cart error fetching client secret"),
+        )
     })?;
     Ok(secret)
 }
@@ -386,13 +444,22 @@ where
     GFut: Future<Output = Result<()>>,
 {
     let sub = get_subscription(internal_id).await?;
-    let sub_id = sub
-        .subscription_id
-        .ok_or_else(|| anyhow!("No subscription for id {}", internal_id))?;
+    let sub_id = sub.subscription_id.ok_or_else(|| {
+        LibError::not_found(
+            "No subscription found",
+            anyhow!("No subscription for id {}", internal_id),
+        )
+    })?;
 
     let sub_id = SubscriptionId::from_str(&sub_id).map_err(|err| {
         tracing::error!("Error parsing subscription ID: {}", err);
-        anyhow!("Error parsing subscription ID")
+        LibError::invalid(
+            "Invalid subscription ID",
+            anyhow!(
+                "deactivate_subscription error parsing subscription ID: {}",
+                err
+            ),
+        )
     })?;
     let client = stripe_client_from_env()?;
 
@@ -400,7 +467,10 @@ where
         .await
         .map_err(|err| {
             tracing::error!("Error cancelling subscription: {}", err);
-            anyhow!("Error cancelling subscription")
+            LibError::upstream(
+                "Error cancelling subscription",
+                anyhow!("Error cancelling subscription"),
+            )
         })?;
 
     cancel_subscription(internal_id).await?;
@@ -459,7 +529,12 @@ where
     let client = stripe_client_from_env()?;
     let sub = stripe::Subscription::retrieve(&client, &subscription_id, &[])
         .await
-        .map_err(|e| anyhow!("Stripe subscription retrieve failed: {e}"))?;
+        .map_err(|e| {
+            LibError::upstream(
+                "Failed to retrieve subscription information",
+                anyhow!("subscription_updated stripe subscription retrieve failed: {e}"),
+            )
+        })?;
 
     // 4) Compute remaining access window (or 0 if ended)
     let seats = seats_from_subscription_first_licensed(&sub);
@@ -520,7 +595,10 @@ where
                         "Error fetching billing link for subscription {}",
                         sub.customer.id()
                     );
-                    anyhow!("Error fetching billing link")
+                    LibError::upstream(
+                        "Error fetching billing link",
+                        anyhow!("handle_stripe_event error fetching billing link"),
+                    )
                 })?;
             deactivate_subscription(internal_id, get_subscription, cancel_subscription).await?;
         }
