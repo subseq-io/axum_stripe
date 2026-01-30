@@ -1,5 +1,8 @@
 use std::str::FromStr;
+use std::time::{Duration, Instant};
 use std::{future::Future, pin::Pin};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::anyhow;
 use chrono::{DateTime, TimeZone, Utc};
@@ -10,8 +13,10 @@ use stripe::{
     CheckoutSessionStatus, CreateCheckoutSession, CreateCheckoutSessionAutomaticTax, CustomerId,
     Event, EventObject, EventType, Expandable, SubscriptionId, SubscriptionSchedule,
 };
+use tokio::sync::{Mutex, OnceCell, RwLock};
 use uuid::Uuid;
 
+use crate::cache::CacheEntry;
 use crate::error::{LibError, Result};
 use crate::tables::{
     BillingLink, CheckoutSession, PricingPlan, SubscriptionState, SubscriptionStateUpdate,
@@ -49,7 +54,7 @@ impl FromStr for SubscriptionPeriod {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiProduct {
     key: String,
@@ -62,7 +67,7 @@ pub struct ApiProduct {
     pricing: ApiPricing,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ApiPricing {
     #[serde(rename_all = "camelCase")]
@@ -88,21 +93,21 @@ pub enum ApiPricing {
     },
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ApiTransformRound {
     Up,
     Down,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ApiTiersMode {
     Graduated,
     Volume,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ApiAggregateUsage {
     Sum,
@@ -242,6 +247,40 @@ fn classify_pricing(price: &stripe::Price) -> Result<ApiPricing> {
     Ok(ApiPricing::FlatRate { unit_amount })
 }
 
+static PRODUCT_CACHE: OnceCell<RwLock<HashMap<String, CacheEntry<ApiProduct>>>> = OnceCell::const_new();
+static PRODUCT_LOCKS: OnceCell<RwLock<HashMap<String, Arc<Mutex<()>>>>> = OnceCell::const_new();
+const PRODUCT_TTL: Duration = Duration::from_secs(60 * 60);
+
+async fn product_cache() -> &'static RwLock<HashMap<String, CacheEntry<ApiProduct>>> {
+    PRODUCT_CACHE
+        .get_or_init(|| async { RwLock::new(HashMap::new()) })
+        .await
+}
+
+async fn product_locks() -> &'static RwLock<HashMap<String, Arc<Mutex<()>>>> {
+    PRODUCT_LOCKS
+        .get_or_init(|| async { RwLock::new(HashMap::new()) })
+        .await
+}
+
+async fn lock_for_key(key: &str) -> Arc<Mutex<()>> {
+    // Fast path: existing lock
+    {
+        let guard = product_locks().await.read().await;
+        if let Some(lock) = guard.get(key) {
+            return Arc::clone(lock);
+        }
+    }
+
+    // Slow path: insert
+    let mut guard = product_locks().await.write().await;
+    let lock = guard
+        .entry(key.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())));
+    Arc::clone(lock)
+}
+
+
 /// Fetch a single product for a plan key.
 /// `fetch_plan` should return the Stripe `price_id` you want to sell for that plan key
 /// (usually from a tiny DB table or config).
@@ -250,6 +289,33 @@ where
     F: for<'a> Fn(&'a str) -> BoxFut<Result<PricingPlan>> + Send + Sync,
 {
     let plan: PricingPlan = fetch_plan(plan_key).await?;
+    let cache_key: String = plan.price_id.clone();
+
+    // 1) Read-through cache
+    {
+        let guard = product_cache().await.read().await;
+        if let Some(entry) = guard.get(&cache_key) {
+            if entry.is_fresh(PRODUCT_TTL) {
+                return Ok(entry.value.clone());
+            }
+        }
+    }
+
+    // 2) Stampede protection (per key)
+    let lock: Arc<Mutex<()>> = lock_for_key(&cache_key).await;
+    let _guard = lock.lock().await;
+
+    // Re-check after acquiring the per-key lock
+    {
+        let guard = product_cache().await.read().await;
+        if let Some(entry) = guard.get(&cache_key) {
+            if entry.is_fresh(PRODUCT_TTL) {
+                return Ok(entry.value.clone());
+            }
+        }
+    }
+
+    // 3) Cache miss: fetch from Stripe
     let client: stripe::Client = stripe_client_from_env()?;
 
     let price_id: stripe::PriceId = stripe::PriceId::from_str(&plan.price_id).map_err(|_| {
@@ -308,8 +374,7 @@ where
         .unwrap_or_default();
     let credits: Option<i32> = credits_from_price(&client, &price).await;
     let pricing: ApiPricing = classify_pricing(&price)?;
-
-    Ok(ApiProduct {
+    let fresh = ApiProduct {
         key: plan.key,
         name,
         description,
@@ -317,7 +382,21 @@ where
         subscription,
         credits,
         pricing,
-    })
+    };
+
+    // 4) Write cache
+    {
+        let mut guard = product_cache().await.write().await;
+        guard.insert(
+            cache_key,
+            CacheEntry {
+                inserted_at: Instant::now(),
+                value: fresh.clone(),
+            },
+        );
+    }
+
+    Ok(fresh)
 }
 
 pub async fn credits_from_price(client: &stripe::Client, price: &stripe::Price) -> Option<i32> {
