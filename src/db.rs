@@ -320,7 +320,7 @@ pub async fn create_checkout_cart(
     internal_id: Uuid,
     base_url: &str,
     stripe_return_uri: &str,
-    plan: &PricingPlan,
+    key: &str,
     quantity: u64,
 ) -> Result<String> {
     let get_customer_id = async |internal_id: Uuid| -> Option<String> {
@@ -338,11 +338,27 @@ pub async fn create_checkout_cart(
         }
     };
 
+    let PriceRow { key, price_id } = PriceRow::get(&pool, key)
+        .await
+        .map_err(|e| {
+            LibError::database(
+                "Failed to get price",
+                anyhow!("db::create_checkout_cart failed to get price: {}", e),
+            )
+        })?
+        .ok_or_else(|| {
+            LibError::not_found(
+                "Price not found",
+                anyhow!("db::create_checkout_cart price not found for key {}", key),
+            )
+        })?;
+    let plan = PricingPlan { key, price_id };
+
     models::create_checkout_cart(
         internal_id,
         base_url,
         stripe_return_uri,
-        plan,
+        &plan,
         quantity,
         get_customer_id,
         create_checkout_session,

@@ -14,7 +14,7 @@ use stripe::Webhook;
 
 use crate::db;
 use crate::error::{ErrorKind, LibError};
-use crate::{models::FinalizeCheckout, tables::PricingPlan};
+use crate::models::FinalizeCheckout;
 
 #[derive(Debug)]
 pub struct AppError(pub LibError);
@@ -87,7 +87,7 @@ where
 
 #[derive(Deserialize)]
 pub struct SelectedPlan {
-    pub plan: PricingPlan,
+    pub key: String,
     pub quantity: u64,
 }
 
@@ -102,13 +102,13 @@ where
     let internal_id = auth_user.id().0;
     let base_url = app.base_url();
     let stripe_return_uri = "/stripe/checkout/done";
-    let SelectedPlan { plan, quantity } = params;
+    let SelectedPlan { key, quantity } = params;
     let session = db::create_checkout_cart(
         app.pool(),
         internal_id,
         &base_url,
         stripe_return_uri,
-        &plan,
+        &key,
         quantity,
     )
     .await?;
