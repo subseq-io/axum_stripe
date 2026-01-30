@@ -55,13 +55,59 @@ pub struct ApiProduct {
     key: String,
     name: String,
     description: String,
-    unit_amount: u32,
     currency: stripe::Currency,
     subscription: SubscriptionPeriod,
     #[serde(skip_serializing_if = "Option::is_none")]
     credits: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    trial_period_days: Option<u32>,
+    pricing: ApiPricing,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ApiPricing {
+    FlatRate {
+        unit_amount: u32,
+    },
+    Package {
+        unit_amount: u32,
+        divide_by: u64,
+        round: ApiTransformRound,
+    },
+    Tiered {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tiers_mode: Option<ApiTiersMode>,
+        tiers: Vec<stripe::PriceTier>,
+    },
+    Usage {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        unit_amount: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        aggregate_usage: Option<ApiAggregateUsage>,
+    },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ApiTransformRound {
+    Up,
+    Down,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ApiTiersMode {
+    Graduated,
+    Volume,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ApiAggregateUsage {
+    Sum,
+    LastDuringPeriod,
+    LastEver,
+    Max,
 }
 
 pub fn stripe_client_from_env() -> Result<stripe::Client> {
@@ -78,26 +124,142 @@ fn parse_u64_opt(s: Option<&str>) -> Option<u64> {
     s.and_then(|v| v.parse::<u64>().ok())
 }
 
+fn parse_unit_amount_u32(price: &stripe::Price) -> Option<u32> {
+    let i: Option<i64> = price.unit_amount.or(price
+        .unit_amount_decimal
+        .as_ref()
+        .and_then(|s| s.parse::<i64>().ok()));
+    i.and_then(|v| u32::try_from(v).ok())
+}
+
+fn v_get<'a>(v: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    let mut cur: &Value = v;
+    for k in path {
+        cur = cur.get(*k)?;
+    }
+    Some(cur)
+}
+
+fn v_str<'a>(v: &'a Value, path: &[&str]) -> Option<&'a str> {
+    v_get(v, path).and_then(|x| x.as_str())
+}
+
+fn v_u64(v: &Value, path: &[&str]) -> Option<u64> {
+    v_get(v, path).and_then(|x| x.as_u64())
+}
+
+fn classify_pricing(price: &stripe::Price) -> Result<ApiPricing> {
+    let raw: Value = serde_json::to_value(price).map_err(|e| {
+        LibError::upstream(
+            "Failed to parse product information",
+            anyhow!("classify_pricing serde_json::to_value failed: {e}"),
+        )
+    })?;
+
+    // Stripe shape:
+    // - recurring.usage_type: "metered" => Usage
+    // - billing_scheme: "tiered" => Tiered
+    // - transform_quantity exists => Package
+    // - else => FlatRate
+    let usage_type: Option<&str> = v_str(&raw, &["recurring", "usage_type"]);
+    if usage_type == Some("metered") {
+        let aggregate_usage: Option<ApiAggregateUsage> =
+            match v_str(&raw, &["recurring", "aggregate_usage"]) {
+                Some("sum") => Some(ApiAggregateUsage::Sum),
+                Some("last_during_period") => Some(ApiAggregateUsage::LastDuringPeriod),
+                Some("last_ever") => Some(ApiAggregateUsage::LastEver),
+                Some("max") => Some(ApiAggregateUsage::Max),
+                _ => None,
+            };
+
+        return Ok(ApiPricing::Usage {
+            unit_amount: parse_unit_amount_u32(price),
+            aggregate_usage,
+        });
+    }
+
+    let billing_scheme: Option<&str> = v_str(&raw, &["billing_scheme"]);
+    if billing_scheme == Some("tiered") {
+        let tiers: Vec<stripe::PriceTier> = price.tiers.clone().unwrap_or_default();
+        if tiers.is_empty() {
+            return Err(LibError::upstream(
+                "Failed to retrieve product information",
+                anyhow!("tiered price missing tiers"),
+            ));
+        }
+
+        let tiers_mode: Option<ApiTiersMode> = match v_str(&raw, &["tiers_mode"]) {
+            Some("graduated") => Some(ApiTiersMode::Graduated),
+            Some("volume") => Some(ApiTiersMode::Volume),
+            _ => None,
+        };
+
+        return Ok(ApiPricing::Tiered { tiers_mode, tiers });
+    }
+
+    if v_get(&raw, &["transform_quantity"]).is_some() {
+        let unit_amount: u32 = parse_unit_amount_u32(price).ok_or_else(|| {
+            LibError::upstream(
+                "Failed to retrieve product information",
+                anyhow!("package price missing unit_amount"),
+            )
+        })?;
+
+        let divide_by: u64 =
+            v_u64(&raw, &["transform_quantity", "divide_by"]).ok_or_else(|| {
+                LibError::upstream(
+                    "Failed to retrieve product information",
+                    anyhow!("package price missing transform_quantity.divide_by"),
+                )
+            })?;
+
+        let round: ApiTransformRound = match v_str(&raw, &["transform_quantity", "round"]) {
+            Some("up") => ApiTransformRound::Up,
+            Some("down") => ApiTransformRound::Down,
+            other => {
+                return Err(LibError::upstream(
+                    "Failed to retrieve product information",
+                    anyhow!("package price invalid transform_quantity.round: {other:?}"),
+                ));
+            }
+        };
+
+        return Ok(ApiPricing::Package {
+            unit_amount,
+            divide_by,
+            round,
+        });
+    }
+
+    // Flat rate per-unit pricing
+    let unit_amount: u32 = parse_unit_amount_u32(price).ok_or_else(|| {
+        LibError::upstream(
+            "Failed to retrieve product information",
+            anyhow!("flat price missing unit_amount"),
+        )
+    })?;
+    Ok(ApiPricing::FlatRate { unit_amount })
+}
+
 /// Fetch a single product for a plan key.
-/// `fetch_plan_ref` should return the Stripe `price_id` you want to sell for that plan key
+/// `fetch_plan` should return the Stripe `price_id` you want to sell for that plan key
 /// (usually from a tiny DB table or config).
 pub async fn get_product<F>(plan_key: &str, fetch_plan: &F) -> Result<ApiProduct>
 where
     F: for<'a> Fn(&'a str) -> BoxFut<Result<PricingPlan>> + Send + Sync,
 {
-    let plan = fetch_plan(plan_key).await?;
-    let client = stripe_client_from_env()?;
+    let plan: PricingPlan = fetch_plan(plan_key).await?;
+    let client: stripe::Client = stripe_client_from_env()?;
 
-    let price_id = stripe::PriceId::from_str(&plan.price_id).map_err(|_| {
+    let price_id: stripe::PriceId = stripe::PriceId::from_str(&plan.price_id).map_err(|_| {
         LibError::invalid(
             "Invalid pricing plan configuration",
             anyhow!("get_product invalid Stripe price id: {}", plan.price_id),
         )
     })?;
 
-    // Expand product so we can read name/description/metadata in one call.
     let expand: &[&str] = &["product"];
-    let price = stripe::Price::retrieve(&client, &price_id, expand)
+    let price: stripe::Price = stripe::Price::retrieve(&client, &price_id, expand)
         .await
         .map_err(|e| {
             LibError::upstream(
@@ -106,35 +268,20 @@ where
             )
         })?;
 
-    let currency = price.currency.ok_or_else(|| {
+    let currency: stripe::Currency = price.currency.ok_or_else(|| {
         LibError::upstream(
             "Failed to retrieve product information",
             anyhow!("get_product stripe price missing currency"),
         )
     })?;
 
-    // For “flat” prices this is Some. For usage/tiered, it can be None.
-    let unit_amount = price
-        .unit_amount
-        .or(price
-            .unit_amount_decimal
-            .as_ref()
-            .and_then(|s| s.parse::<i64>().ok()))
-        .ok_or_else(|| {
-            LibError::upstream(
-                "Failed to retrieve product information",
-                anyhow!("get_product stripe price missing unit_amount (usage/tiered price?)"),
-            )
-        })?;
-
-    let subscription = match price.recurring.as_ref().map(|r| r.interval) {
+    let subscription: SubscriptionPeriod = match price.recurring.as_ref().map(|r| r.interval) {
         Some(stripe::RecurringInterval::Year) => SubscriptionPeriod::Yearly,
-        Some(_) => SubscriptionPeriod::Monthly, // month/week/day/etc -> bucket as “recurring”
+        Some(_) => SubscriptionPeriod::Monthly,
         None => SubscriptionPeriod::OneTime,
     };
 
-    // Product details (expanded) or fallback to a second call if it wasn't expanded for some reason.
-    let product = match price.product.clone() {
+    let product: Option<stripe::Product> = match price.product.clone() {
         Some(stripe::Expandable::Object(p)) => Some(*p),
         Some(stripe::Expandable::Id(pid)) => Some(
             stripe::Product::retrieve(&client, &pid, &[])
@@ -154,19 +301,21 @@ where
         .map(|p| p.name.clone().or_else(|| price.nickname.clone()))
         .flatten()
         .unwrap_or_else(|| plan.key.clone());
-
-    let description = product.as_ref().and_then(|p| p.description.clone());
-    let credits = credits_from_price(&client, &price).await;
+    let description: String = product
+        .as_ref()
+        .and_then(|p| p.description.clone())
+        .unwrap_or_default();
+    let credits: Option<i32> = credits_from_price(&client, &price).await;
+    let pricing: ApiPricing = classify_pricing(&price)?;
 
     Ok(ApiProduct {
         key: plan.key,
         name,
-        description: description.unwrap_or_default(),
-        unit_amount: unit_amount as u32,
+        description,
         currency,
         subscription,
         credits,
-        trial_period_days: None,
+        pricing,
     })
 }
 
