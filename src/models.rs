@@ -65,19 +65,21 @@ pub struct ApiProduct {
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ApiPricing {
-    FlatRate {
-        unit_amount: u32,
-    },
+    #[serde(rename_all = "camelCase")]
+    FlatRate { unit_amount: u32 },
+    #[serde(rename_all = "camelCase")]
     Package {
         unit_amount: u32,
         divide_by: u64,
         round: ApiTransformRound,
     },
+    #[serde(rename_all = "camelCase")]
     Tiered {
         #[serde(skip_serializing_if = "Option::is_none")]
         tiers_mode: Option<ApiTiersMode>,
         tiers: Vec<stripe::PriceTier>,
     },
+    #[serde(rename_all = "camelCase")]
     Usage {
         #[serde(skip_serializing_if = "Option::is_none")]
         unit_amount: Option<u32>,
