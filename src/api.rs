@@ -30,10 +30,7 @@ impl IntoResponse for AppError {
             ErrorKind::Unknown => StatusCode::INTERNAL_SERVER_ERROR,
             ErrorKind::Upstream => StatusCode::INTERNAL_SERVER_ERROR,
         };
-
-        // Log full chain here; return only safe public message.
-        // tracing::error!(error = %self.0.source, kind = ?self.0.kind, "request failed");
-
+        tracing::error!(error = %self.0.source, kind = ?self.0.kind, "request failed");
         (status, self.0.public).into_response()
     }
 }
