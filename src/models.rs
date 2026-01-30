@@ -257,7 +257,7 @@ where
         )
     })?;
 
-    let expand: &[&str] = &["product"];
+    let expand: &[&str] = &["product", "tiers"];
     let price: stripe::Price = stripe::Price::retrieve(&client, &price_id, expand)
         .await
         .map_err(|e| {
