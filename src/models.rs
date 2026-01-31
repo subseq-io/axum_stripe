@@ -1,8 +1,8 @@
+use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{future::Future, pin::Pin};
-use std::collections::HashMap;
-use std::sync::Arc;
 
 use anyhow::anyhow;
 use chrono::{DateTime, TimeZone, Utc};
@@ -247,7 +247,8 @@ fn classify_pricing(price: &stripe::Price) -> Result<ApiPricing> {
     Ok(ApiPricing::FlatRate { unit_amount })
 }
 
-static PRODUCT_CACHE: OnceCell<RwLock<HashMap<String, CacheEntry<ApiProduct>>>> = OnceCell::const_new();
+static PRODUCT_CACHE: OnceCell<RwLock<HashMap<String, CacheEntry<ApiProduct>>>> =
+    OnceCell::const_new();
 static PRODUCT_LOCKS: OnceCell<RwLock<HashMap<String, Arc<Mutex<()>>>>> = OnceCell::const_new();
 const PRODUCT_TTL: Duration = Duration::from_secs(60 * 60);
 
@@ -279,7 +280,6 @@ async fn lock_for_key(key: &str) -> Arc<Mutex<()>> {
         .or_insert_with(|| Arc::new(Mutex::new(())));
     Arc::clone(lock)
 }
-
 
 /// Fetch a single product for a plan key.
 /// `fetch_plan` should return the Stripe `price_id` you want to sell for that plan key

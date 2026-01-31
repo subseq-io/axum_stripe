@@ -86,6 +86,7 @@ where
 pub struct SelectedPlan {
     pub key: String,
     pub quantity: u64,
+    pub status_uri: String,
 }
 
 async fn stripe_checkout_cart_handler<S>(
@@ -98,13 +99,16 @@ where
 {
     let internal_id = auth_user.id().0;
     let base_url = app.base_url();
-    let stripe_return_uri = "/stripe/checkout/done";
-    let SelectedPlan { key, quantity } = params;
+    let SelectedPlan {
+        key,
+        quantity,
+        status_uri,
+    } = params;
     let session = db::create_checkout_cart(
         app.pool(),
         internal_id,
         &base_url,
-        stripe_return_uri,
+        &status_uri,
         &key,
         quantity,
     )
